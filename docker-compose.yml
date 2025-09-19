@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  search-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ps-search-api:latest
+    container_name: ps-search-api
+    environment:
+      RAPIDAPI_KEY: ${RAPIDAPI_KEY}
+      PORT: ${GO_API_PORT:-4002}
+      PG_DSN: ${PG_DSN:-postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@host.docker.internal:5432/${POSTGRES_DB:-roa}?sslmode=disable&search_path=ingest,public}
+      REDIS_ADDR: ${REDIS_ADDR:-redis:6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      ENABLE_INDEXER: ${ENABLE_INDEXER:-0}
+    ports:
+      - "${GO_API_PORT:-4002}:4002"
+    networks: [propnet]
+
+networks:
+  propnet:
+    external: true

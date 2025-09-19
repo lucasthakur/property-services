@@ -26,7 +26,7 @@ type ListingsRequest struct {
     MaxPrice     *int   `json:"maxprice,omitempty"`
 }
 
-func defInt(v *int, d int) int { if v == nil { return d }; return *v }
+// use defInt from search_handler.go (same package)
 
 func RegisterListings(r chi.Router, d ListingsDeps) {
     // POST JSON
@@ -63,7 +63,8 @@ func handleListingsRequest(w http.ResponseWriter, req *http.Request, d ListingsD
         _ = json.NewEncoder(w).Encode(map[string]any{"error":"postalcode_required"})
         return
     }
-    pagesize := defInt(body.Limit, 40)
+    // Default to 5 listings as requested
+    pagesize := defInt(body.Limit, 5)
     page := defInt(body.Page, 1)
     beds := defInt(body.Beds, 0)
     baths := defInt(body.Baths, 0)
@@ -82,6 +83,14 @@ func handleListingsRequest(w http.ResponseWriter, req *http.Request, d ListingsD
         _ = json.NewEncoder(w).Encode(map[string]any{"error":"map_error","detail":err.Error()})
         return
     }
+    // Hydrate photos only when images are missing to avoid 429s
+    for i := range cards {
+        if cards[i].ID == "" { continue }
+        if len(cards[i].Images) > 0 { continue }
+        photos, err := d.ATTOM.GetPhotos(req.Context(), cards[i].ID)
+        if err == nil && len(photos) > 0 {
+            cards[i].Images = photos
+        }
+    }
     render.JSON(w, req, map[string]any{"ok":true, "count": len(cards), "properties": cards})
 }
-

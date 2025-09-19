@@ -49,6 +49,19 @@ func RegisterSearch(r chi.Router, d SearchDeps) {
         var body SearchRequest
         // Postal-based
         body.PostalCode = q.Get("postalcode")
+        // If not provided, try to extract ZIP from human-readable `q` param
+        if body.PostalCode == "" {
+            if s := q.Get("q"); s != "" {
+                for i := len(s) - 5; i >= 0; i-- {
+                    if i+5 <= len(s) {
+                        sub := s[i : i+5]
+                        allDigits := true
+                        for _, ch := range sub { if ch < '0' || ch > '9' { allDigits = false; break } }
+                        if allDigits { body.PostalCode = sub; break }
+                    }
+                }
+            }
+        }
         if v := q.Get("limit"); v != "" { if i, err := strconv.Atoi(v); err == nil { body.Limit = &i } }
         if v := q.Get("page"); v != "" { if i, err := strconv.Atoi(v); err == nil { body.Page = &i } }
         body.PropertyType = q.Get("property_type")
@@ -57,6 +70,10 @@ func RegisterSearch(r chi.Router, d SearchDeps) {
         // Legacy radius (optional)
         if v := q.Get("lat"); v != "" { if f, err := strconv.ParseFloat(v, 64); err == nil { body.Lat = &f } }
         if v := q.Get("lon"); v != "" { if f, err := strconv.ParseFloat(v, 64); err == nil { body.Lon = &f } }
+        // Support `lng` alias
+        if body.Lon == nil {
+            if v := q.Get("lng"); v != "" { if f, err := strconv.ParseFloat(v, 64); err == nil { body.Lon = &f } }
+        }
         if v := q.Get("radius"); v != "" { if f, err := strconv.ParseFloat(v, 64); err == nil { body.Radius = &f } }
         handleSearchRequest(w, req, d, body)
     })
@@ -65,7 +82,8 @@ func RegisterSearch(r chi.Router, d SearchDeps) {
 func handleSearchRequest(w http.ResponseWriter, req *http.Request, d SearchDeps, body SearchRequest) {
     // Prefer postal-based search
     if body.PostalCode != "" {
-        pagesize := defInt(body.Limit, 40)
+        // Default to 5 to align with RapidAPI usage
+        pagesize := defInt(body.Limit, 5)
         page := defInt(body.Page, 1)
         raw, err := d.ATTOM.SearchByPostal(req.Context(), body.PostalCode, pagesize, page, body.PropertyType, body.OrderBy)
         if err != nil {
@@ -115,4 +133,3 @@ func handleSearchRequest(w http.ResponseWriter, req *http.Request, d SearchDeps,
         "properties": cards,
     })
 }
-

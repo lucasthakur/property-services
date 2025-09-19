@@ -1,7 +1,8 @@
 package attom
 
 import (
-	"encoding/json"
+    "encoding/json"
+    "strconv"
 )
 
 // stringNumber accepts string or number JSON and stores as string
@@ -28,156 +29,79 @@ func (s *stringNumber) UnmarshalJSON(b []byte) error {
 }
 
 func MapSearchPayloadToCards(raw []byte) ([]PropertyCard, error) {
-	// ATTOM payload shape differs by product; map defensively.
-	// Expect something like { "property": [ { "address": {...}, "lot": {...}, "building": {...}, ... } ] }
-	type aAddress struct {
-		OneLine string `json:"oneLine"`
-		Line1   string `json:"line1"`
-		City    string `json:"locality"`
-		State   string `json:"region"`
-		Zip     string `json:"postal1"`
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
-	}
-	type aBuilding struct {
-		Rooms int `json:"rooms"`
-		Beds  int `json:"bedrooms"`
-		Baths struct {
-			Full int `json:"full"`
-			Total float64 `json:"baths"` // sometimes decimal
-		} `json:"bathrooms"`
-		Sqft int `json:"size"`
-		Year int `json:"yearBuilt"`
-	}
+    // RapidAPI Realtor search payload: { count, properties: [ {...} ] }
+    type rCoord struct {
+        Lat float64 `json:"lat"`
+        Lon float64 `json:"lon"`
+    }
+    type rAddr struct {
+        City       string  `json:"city"`
+        State      string  `json:"state"`
+        StateCode  string  `json:"state_code"`
+        PostalCode string  `json:"postal_code"`
+        Line       string  `json:"line"`
+        Coordinate rCoord  `json:"coordinate"`
+    }
+    type rDesc struct {
+        Beds               int    `json:"beds"`
+        BathsConsolidated  string `json:"baths_consolidated"`
+        Sqft               int    `json:"sqft"`
+        Type               string `json:"type"`
+    }
+    type rPhoto struct { Href string `json:"href"` }
+    type rProp struct {
+        ListingID   string   `json:"listing_id"`
+        ListPrice   int      `json:"list_price"`
+        Location    struct{ Address rAddr `json:"address"` } `json:"location"`
+        Description rDesc    `json:"description"`
+        PrimaryPhoto rPhoto  `json:"primary_photo"`
+        Photos      []rPhoto `json:"photos"`
+        Status      string   `json:"status"`
+    }
+    var root struct { Properties []rProp `json:"properties"` }
+    if err := json.Unmarshal(raw, &root); err != nil { return nil, err }
 
-    type aProperty struct {
-        Identifier struct {
-            AttomID stringNumber `json:"attomId"`
-            APN     stringNumber `json:"apn"`
-            MLS     stringNumber `json:"mlsId"`
-        } `json:"identifier"`
-        Address  aAddress  `json:"address"`
-        Building aBuilding `json:"building"`
-        Sale     struct {
-            Price int `json:"amount"`
-        } `json:"sale"`
-		AVM struct {
-			Value int `json:"amount"`
-		} `json:"avm"`
-		Use struct {
-			Type string `json:"propClass"`
-		} `json:"use"`
-	}
+    out := make([]PropertyCard, 0, len(root.Properties))
+    for _, p := range root.Properties {
+        // baths
+        baths := 0
+        if p.Description.BathsConsolidated != "" {
+            if i, err := strconv.Atoi(p.Description.BathsConsolidated); err == nil { baths = i }
+        }
+        // images (primary + inline photos)
+        imgs := make([]string, 0, 1+len(p.Photos))
+        if p.PrimaryPhoto.Href != "" { imgs = append(imgs, p.PrimaryPhoto.Href) }
+        for _, ph := range p.Photos { if ph.Href != "" { imgs = append(imgs, ph.Href) } }
 
-	var root struct {
-		Property []aProperty `json:"property"`
-	}
-	if err := json.Unmarshal(raw, &root); err != nil {
-		return nil, err
-	}
-
-	out := make([]PropertyCard, 0, len(root.Property))
-	for _, p := range root.Property {
-		price := p.Sale.Price
-		if price == 0 && p.AVM.Value > 0 {
-			price = p.AVM.Value
-		}
-		baths := int(p.Building.Baths.Total)
-		if baths == 0 { baths = p.Building.Baths.Full }
+        state := p.Location.Address.StateCode
+        if state == "" { state = p.Location.Address.State }
 
         out = append(out, PropertyCard{
-            ID:        firstNonEmpty(string(p.Identifier.AttomID), string(p.Identifier.APN), string(p.Identifier.MLS)),
-            Address:   nonEmpty(p.Address.Line1, p.Address.OneLine),
-            City:      p.Address.City,
-            State:     p.Address.State,
-            Zip:       p.Address.Zip,
-            Type:      p.Use.Type,
-			Price:     price,
-			Beds:      maxInt(p.Building.Beds, 0),
-			Baths:     maxInt(baths, 0),
-			Sqft:      maxInt(p.Building.Sqft, 0),
-			YearBuilt: maxInt(p.Building.Year, 0),
-			Images:    []string{}, // ATTOM may not provide; fill from your CDN later
-			Coords:    [2]float64{p.Address.Longitude, p.Address.Latitude},
-			MLS:       string(p.Identifier.MLS),
-			Source:    "attom",
-		})
-	}
-	return out, nil
+            ID:        p.ListingID,
+            Address:   p.Location.Address.Line,
+            City:      p.Location.Address.City,
+            State:     state,
+            Zip:       p.Location.Address.PostalCode,
+            Type:      p.Description.Type,
+            Price:     p.ListPrice,
+            Beds:      maxInt(p.Description.Beds, 0),
+            Baths:     maxInt(baths, 0),
+            Sqft:      maxInt(p.Description.Sqft, 0),
+            YearBuilt: 0,
+            Images:    imgs,
+            Coords:    [2]float64{p.Location.Address.Coordinate.Lon, p.Location.Address.Coordinate.Lat},
+            MLS:       "",
+            Source:    "rapidapi",
+        })
+    }
+    return out, nil
 }
 
 // MapListingPayloadToCards maps ATTOM Listing Snapshot payload to PropertyCard slice.
 // This function is intentionally defensive to tolerate minor schema differences across plans.
 func MapListingPayloadToCards(raw []byte) ([]PropertyCard, error) {
-
-    type lAddress struct {
-        OneLine   string   `json:"oneLine"`
-        Line1     string   `json:"line1"`
-        City      string   `json:"locality"`
-        State     string   `json:"region"`
-        Zip       string   `json:"postal1"`
-        Latitude  float64  `json:"latitude"`
-        Longitude float64  `json:"longitude"`
-    }
-    type lBuilding struct {
-        Beds  int `json:"bedrooms"`
-        Sqft  int `json:"size"`
-        Year  int `json:"yearBuilt"`
-        Baths struct {
-            Total float64 `json:"baths"`
-            Full  int     `json:"full"`
-        } `json:"bathrooms"`
-    }
-    type lListing struct {
-        ListPrice int `json:"listPrice"`
-        Status    string `json:"status"`
-        Photos    []struct{
-            Href string `json:"href"`
-        } `json:"photos"`
-        Mls struct{
-            Id string `json:"id"`
-        } `json:"mls"`
-    }
-    type lProperty struct {
-        Identifier struct {
-            AttomID stringNumber `json:"attomId"`
-            APN     stringNumber `json:"apn"`
-            MLS     stringNumber `json:"mlsId"`
-        } `json:"identifier"`
-        Address  lAddress  `json:"address"`
-        Building lBuilding `json:"building"`
-        Listing  lListing  `json:"listing"`
-    }
-    var root struct {
-        Property []lProperty `json:"property"`
-    }
-    if err := json.Unmarshal(raw, &root); err != nil { return nil, err }
-
-    out := make([]PropertyCard, 0, len(root.Property))
-    for _, p := range root.Property {
-        baths := int(p.Building.Baths.Total)
-        if baths == 0 { baths = p.Building.Baths.Full }
-        imgs := make([]string, 0, len(p.Listing.Photos))
-        for _, ph := range p.Listing.Photos { if ph.Href != "" { imgs = append(imgs, ph.Href) } }
-        out = append(out, PropertyCard{
-            ID:        firstNonEmpty(string(p.Identifier.AttomID), string(p.Identifier.APN), string(p.Identifier.MLS), p.Listing.Mls.Id),
-            Address:   nonEmpty(p.Address.Line1, p.Address.OneLine),
-            City:      p.Address.City,
-            State:     p.Address.State,
-            Zip:       p.Address.Zip,
-            Type:      "listing",
-            Price:     p.Listing.ListPrice,
-            Beds:      maxInt(p.Building.Beds, 0),
-            Baths:     maxInt(baths, 0),
-            Sqft:      maxInt(p.Building.Sqft, 0),
-            YearBuilt: maxInt(p.Building.Year, 0),
-            Images:    imgs,
-            Coords:    [2]float64{p.Address.Longitude, p.Address.Latitude},
-            MLS:       string(p.Identifier.MLS),
-            Source:    "attom_listings",
-        })
-    }
-    return out, nil
+    // Same mapping as search for RapidAPI Realtor.
+    return MapSearchPayloadToCards(raw)
 }
 
 func nonEmpty(a, b string) string {

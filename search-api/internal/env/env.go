@@ -13,6 +13,11 @@ func Must(k string) string {
 	}
 	return v
 }
+func Get(k, def string) string {
+    v := os.Getenv(k)
+    if v == "" { return def }
+    return v
+}
 func GetInt(k string, def int) int {
 	v := os.Getenv(k)
 	if v == "" { return def }
