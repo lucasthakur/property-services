@@ -1,35 +1,39 @@
 package store
 
 import (
-    "context"
-    "crypto/sha256"
-    "database/sql"
-    "encoding/hex"
-    "errors"
-    "time"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
 
-    _ "github.com/jackc/pgx/v5/stdlib"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-type Store struct { DB *sql.DB }
+type Store struct{ DB *sql.DB }
 
 func Open(dsn string) (*Store, error) {
-    db, err := sql.Open("pgx", dsn)
-    if err != nil { return nil, err }
-    db.SetMaxOpenConns(10)
-    db.SetMaxIdleConns(5)
-    db.SetConnMaxLifetime(30 * time.Minute)
-    return &Store{DB: db}, nil
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	return &Store{DB: db}, nil
 }
 
 func (s *Store) Ping(ctx context.Context) error { return s.DB.PingContext(ctx) }
 
 func (s *Store) Migrate(ctx context.Context) error {
-    stmts := []string{
-        `CREATE EXTENSION IF NOT EXISTS pgcrypto;`,
-        `CREATE EXTENSION IF NOT EXISTS cube;`,
-        `CREATE EXTENSION IF NOT EXISTS earthdistance;`,
-        `CREATE TABLE IF NOT EXISTS properties (
+	stmts := []string{
+		`CREATE EXTENSION IF NOT EXISTS pgcrypto;`,
+		`CREATE EXTENSION IF NOT EXISTS cube;`,
+		`CREATE EXTENSION IF NOT EXISTS earthdistance;`,
+		`CREATE TABLE IF NOT EXISTS ingest_properties (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             property_key    TEXT NOT NULL,
             address_line1   TEXT NOT NULL,
@@ -43,11 +47,11 @@ func (s *Store) Migrate(ctx context.Context) error {
             last_fetch_at   TIMESTAMPTZ,
             stale_after     TIMESTAMPTZ
         );`,
-        `CREATE UNIQUE INDEX IF NOT EXISTS ux_properties_property_key ON properties(property_key);`,
-        `CREATE INDEX IF NOT EXISTS idx_properties_geo ON properties USING GIST (ll_to_earth(lat, lon));`,
-        `CREATE TABLE IF NOT EXISTS listings (
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_ingest_properties_property_key ON ingest_properties(property_key);`,
+		`CREATE INDEX IF NOT EXISTS idx_ingest_properties_geo ON ingest_properties USING GIST (ll_to_earth(lat, lon));`,
+		`CREATE TABLE IF NOT EXISTS ingest_listings (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            property_id       UUID NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+            property_id       UUID NOT NULL REFERENCES ingest_properties(id) ON DELETE CASCADE,
             provider          TEXT NOT NULL,
             source_id         TEXT NOT NULL,
             listing_id        TEXT,
@@ -70,13 +74,13 @@ func (s *Store) Migrate(ctx context.Context) error {
             last_fetch_at     TIMESTAMPTZ,
             stale_after       TIMESTAMPTZ
         );`,
-        `CREATE UNIQUE INDEX IF NOT EXISTS ux_listings_provider_ids ON listings(provider, source_id, listing_id);`,
-        `CREATE INDEX IF NOT EXISTS idx_listings_property ON listings(property_id);`,
-        `CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status);`,
-        `CREATE INDEX IF NOT EXISTS idx_listings_list_date ON listings(list_date);`,
-        `CREATE TABLE IF NOT EXISTS listing_photos (
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_ingest_listings_provider_ids ON ingest_listings(provider, source_id, listing_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_ingest_listings_property ON ingest_listings(property_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_ingest_listings_status ON ingest_listings(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_ingest_listings_list_date ON ingest_listings(list_date);`,
+		`CREATE TABLE IF NOT EXISTS ingest_listing_photos (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            listing_id    UUID NOT NULL REFERENCES listings(id) ON DELETE CASCADE,
+            listing_id    UUID NOT NULL REFERENCES ingest_listings(id) ON DELETE CASCADE,
             href          TEXT NOT NULL,
             kind          TEXT,
             tags          JSONB,
@@ -84,8 +88,8 @@ func (s *Store) Migrate(ctx context.Context) error {
             position      INTEGER,
             created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
         );`,
-        `CREATE INDEX IF NOT EXISTS idx_listphotos_listing ON listing_photos(listing_id);`,
-        `CREATE TABLE IF NOT EXISTS provider_raw_snapshots (
+		`CREATE INDEX IF NOT EXISTS idx_ingest_listphotos_listing ON ingest_listing_photos(listing_id);`,
+		`CREATE TABLE IF NOT EXISTS ingest_provider_raw_snapshots (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             provider       TEXT NOT NULL,
             endpoint       TEXT NOT NULL,
@@ -94,9 +98,9 @@ func (s *Store) Migrate(ctx context.Context) error {
             fetched_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
             payload_sha256 TEXT NOT NULL
         );`,
-        `CREATE INDEX IF NOT EXISTS idx_snapshots_provider ON provider_raw_snapshots(provider, endpoint, fetched_at DESC);`,
-        `CREATE INDEX IF NOT EXISTS idx_snapshots_external ON provider_raw_snapshots(provider, external_id);`,
-        `CREATE TABLE IF NOT EXISTS hydrate_jobs (
+		`CREATE INDEX IF NOT EXISTS idx_ingest_snapshots_provider ON ingest_provider_raw_snapshots(provider, endpoint, fetched_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_ingest_snapshots_external ON ingest_provider_raw_snapshots(provider, external_id);`,
+		`CREATE TABLE IF NOT EXISTS ingest_hydrate_jobs (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             idempotency_key  TEXT NOT NULL,
             provider         TEXT NOT NULL,
@@ -110,88 +114,272 @@ func (s *Store) Migrate(ctx context.Context) error {
             created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
         );`,
-        `CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_idem ON hydrate_jobs(idempotency_key);`,
-    }
-    for _, q := range stmts {
-        if _, err := s.DB.ExecContext(ctx, q); err != nil { return err }
-    }
-    return nil
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_ingest_jobs_idem ON ingest_hydrate_jobs(idempotency_key);`,
+	}
+	for _, q := range stmts {
+		if _, err := s.DB.ExecContext(ctx, q); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type UpsertInput struct {
-    PropertyKey string
-    Address1    string
-    City        string
-    State       string
-    Zip         string
-    Lat         sql.NullFloat64
-    Lon         sql.NullFloat64
-    // Listing bits
-    Provider    string
-    SourceID    string
-    ListingID   sql.NullString
-    Status      string
-    ListPrice   sql.NullFloat64
-    Beds        sql.NullInt64
-    Baths       sql.NullFloat64
-    Sqft        sql.NullInt64
-    Photos      []string
-    // Raw snapshot
-    Endpoint    string
-    ExternalID  string
-    PayloadJSON []byte
+	PropertyKey string
+	Address1    string
+	City        string
+	State       string
+	Zip         string
+	Lat         sql.NullFloat64
+	Lon         sql.NullFloat64
+	// Listing bits
+	Provider  string
+	SourceID  string
+	ListingID sql.NullString
+	Status    string
+	ListPrice sql.NullFloat64
+	Beds      sql.NullInt64
+	Baths     sql.NullFloat64
+	Sqft      sql.NullInt64
+	Photos    []string
+	// Raw snapshot
+	Endpoint    string
+	ExternalID  string
+	PayloadJSON []byte
 }
 
 type UpsertResult struct {
-    PropertyID string
-    ListingID  string
+	PropertyID string
+	ListingID  string
+}
+
+type ListingRecord struct {
+	PropertyKey       string
+	AddressLine1      string
+	City              string
+	State             string
+	Zip               string
+	Lat               sql.NullFloat64
+	Lon               sql.NullFloat64
+	ListingID         string
+	ListingExternalID sql.NullString
+	ListPrice         sql.NullFloat64
+	Beds              sql.NullInt64
+	Baths             sql.NullFloat64
+	Sqft              sql.NullInt64
+	PropertyType      sql.NullString
+	Photos            []string
 }
 
 func (s *Store) WriteSnapshotAndUpsert(ctx context.Context, in UpsertInput) (UpsertResult, error) {
-    var res UpsertResult
-    if s.DB == nil { return res, errors.New("nil db") }
-    tx, err := s.DB.BeginTx(ctx, nil)
-    if err != nil { return res, err }
-    defer func() { if err != nil { _ = tx.Rollback() } }()
+	var res UpsertResult
+	if s.DB == nil {
+		return res, errors.New("nil db")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return res, err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
 
-    // properties upsert
-    err = tx.QueryRowContext(ctx, `
-        INSERT INTO properties (property_key, address_line1, city, state, zip, lat, lon, last_fetch_at, stale_after)
+	// ingest_properties upsert
+	err = tx.QueryRowContext(ctx, `
+        INSERT INTO ingest_properties (property_key, address_line1, city, state, zip, lat, lon, last_fetch_at, stale_after)
         VALUES ($1,$2,$3,$4,$5,$6,$7, now(), now() + interval '5 minutes')
         ON CONFLICT (property_key)
         DO UPDATE SET address_line1=EXCLUDED.address_line1, city=EXCLUDED.city, state=EXCLUDED.state, zip=EXCLUDED.zip, lat=EXCLUDED.lat, lon=EXCLUDED.lon, updated_at=now(), last_fetch_at=now(), stale_after=now() + interval '5 minutes'
         RETURNING id`,
-        in.PropertyKey, in.Address1, in.City, in.State, in.Zip, in.Lat, in.Lon,
-    ).Scan(&res.PropertyID)
-    if err != nil { return res, err }
+		in.PropertyKey, in.Address1, in.City, in.State, in.Zip, in.Lat, in.Lon,
+	).Scan(&res.PropertyID)
+	if err != nil {
+		return res, err
+	}
 
-    // listings upsert
-    err = tx.QueryRowContext(ctx, `
-        INSERT INTO listings (property_id, provider, source_id, listing_id, status, list_price, beds, baths, sqft, coords, last_fetch_at, stale_after)
+	// ingest_listings upsert
+	err = tx.QueryRowContext(ctx, `
+        INSERT INTO ingest_listings (property_id, provider, source_id, listing_id, status, list_price, beds, baths, sqft, coords, last_fetch_at, stale_after)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, NULL, now(), now() + interval '5 minutes')
         ON CONFLICT (provider, source_id, listing_id)
         DO UPDATE SET property_id=EXCLUDED.property_id, status=EXCLUDED.status, list_price=EXCLUDED.list_price, beds=EXCLUDED.beds, baths=EXCLUDED.baths, sqft=EXCLUDED.sqft, updated_at=now(), last_fetch_at=now(), stale_after=now() + interval '5 minutes'
         RETURNING id`,
-        res.PropertyID, in.Provider, in.SourceID, in.ListingID, in.Status, in.ListPrice, in.Beds, in.Baths, in.Sqft,
-    ).Scan(&res.ListingID)
-    if err != nil { return res, err }
+		res.PropertyID, in.Provider, in.SourceID, in.ListingID, in.Status, in.ListPrice, in.Beds, in.Baths, in.Sqft,
+	).Scan(&res.ListingID)
+	if err != nil {
+		return res, err
+	}
 
-    // photos: replace current set with new set
-    if _, err = tx.ExecContext(ctx, `DELETE FROM listing_photos WHERE listing_id=$1`, res.ListingID); err != nil { return res, err }
-    for i, href := range in.Photos {
-        if href == "" { continue }
-        if _, err = tx.ExecContext(ctx, `INSERT INTO listing_photos (listing_id, href, position) VALUES ($1,$2,$3)`, res.ListingID, href, i); err != nil { return res, err }
-    }
+	// photos: replace current set with new set
+	if _, err = tx.ExecContext(ctx, `DELETE FROM ingest_listing_photos WHERE listing_id=$1`, res.ListingID); err != nil {
+		return res, err
+	}
+	for i, href := range in.Photos {
+		if href == "" {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO ingest_listing_photos (listing_id, href, position) VALUES ($1,$2,$3)`, res.ListingID, href, i); err != nil {
+			return res, err
+		}
+	}
 
-    // raw snapshot
-    sum := sha256.Sum256(in.PayloadJSON)
-    sha := hex.EncodeToString(sum[:])
-    if _, err = tx.ExecContext(ctx, `
-        INSERT INTO provider_raw_snapshots (provider, endpoint, external_id, payload, payload_sha256)
+	// raw snapshot for ingestion audit
+	sum := sha256.Sum256(in.PayloadJSON)
+	sha := hex.EncodeToString(sum[:])
+	if _, err = tx.ExecContext(ctx, `
+        INSERT INTO ingest_provider_raw_snapshots (provider, endpoint, external_id, payload, payload_sha256)
         VALUES ($1,$2,$3,$4,$5)
-    `, in.Provider, in.Endpoint, in.ExternalID, string(in.PayloadJSON), sha); err != nil { return res, err }
+    `, in.Provider, in.Endpoint, in.ExternalID, string(in.PayloadJSON), sha); err != nil {
+		return res, err
+	}
 
-    err = tx.Commit()
-    if err != nil { return res, err }
-    return res, nil
+	err = tx.Commit()
+	if err != nil {
+		return res, err
+	}
+	return res, nil
+}
+
+func (s *Store) FetchListingsByPostal(ctx context.Context, postal string, limit, offset int, propertyType string) ([]ListingRecord, error) {
+	if s.DB == nil {
+		return nil, errors.New("nil db")
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	args := []any{postal, limit, offset}
+	query := strings.Builder{}
+	query.WriteString(`
+		SELECT p.property_key, p.address_line1, p.city, p.state, p.zip,
+		       p.lat, p.lon, l.id, l.listing_id, l.list_price, l.beds, l.baths, l.sqft, l.property_type
+		FROM ingest_properties p
+		JOIN ingest_listings l ON l.property_id = p.id
+		WHERE p.zip = $1
+	`)
+	if propertyType != "" {
+		query.WriteString(" AND l.property_type = $4")
+		args = append(args, propertyType)
+	}
+	query.WriteString(`
+		ORDER BY l.updated_at DESC
+		LIMIT $2 OFFSET $3
+	`)
+	rows, err := s.DB.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []ListingRecord
+	for rows.Next() {
+		var rec ListingRecord
+		if err := rows.Scan(&rec.PropertyKey, &rec.AddressLine1, &rec.City, &rec.State, &rec.Zip,
+			&rec.Lat, &rec.Lon, &rec.ListingID, &rec.ListingExternalID, &rec.ListPrice, &rec.Beds, &rec.Baths, &rec.Sqft, &rec.PropertyType); err != nil {
+			return nil, err
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return records, nil
+	}
+	placeholders := make([]string, len(records))
+	photoArgs := make([]any, len(records))
+	for i, rec := range records {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		photoArgs[i] = rec.ListingID
+	}
+	photoRows, err := s.DB.QueryContext(ctx,
+		`SELECT listing_id, href FROM ingest_listing_photos WHERE listing_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY listing_id, position`,
+		photoArgs...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer photoRows.Close()
+	photosByListing := make(map[string][]string)
+	for photoRows.Next() {
+		var listingID, href string
+		if err := photoRows.Scan(&listingID, &href); err != nil {
+			return nil, err
+		}
+		photosByListing[listingID] = append(photosByListing[listingID], href)
+	}
+	if err := photoRows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range records {
+		records[i].Photos = photosByListing[records[i].ListingID]
+	}
+	return records, nil
+}
+
+func (s *Store) FetchListingPhotos(ctx context.Context, providerListingID string) ([]string, error) {
+	if s.DB == nil {
+		return nil, errors.New("nil db")
+	}
+	rows, err := s.DB.QueryContext(ctx, `
+		SELECT lp.href
+		FROM ingest_listings l
+		JOIN ingest_listing_photos lp ON lp.listing_id = l.id
+		WHERE l.listing_id = $1
+		ORDER BY lp.position, lp.created_at
+	`, providerListingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var photos []string
+	for rows.Next() {
+		var href string
+		if err := rows.Scan(&href); err != nil {
+			return nil, err
+		}
+		photos = append(photos, href)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return photos, nil
+}
+
+func (s *Store) ReplaceListingPhotos(ctx context.Context, providerListingID string, photos []string) error {
+	if s.DB == nil {
+		return errors.New("nil db")
+	}
+	var listingUUID string
+	err := s.DB.QueryRowContext(ctx, `SELECT id FROM ingest_listings WHERE listing_id=$1 ORDER BY updated_at DESC LIMIT 1`, providerListingID).Scan(&listingUUID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.ExecContext(ctx, `DELETE FROM ingest_listing_photos WHERE listing_id=$1`, listingUUID); err != nil {
+		return err
+	}
+	for i, href := range photos {
+		if href == "" {
+			continue
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO ingest_listing_photos (listing_id, href, position) VALUES ($1,$2,$3)`, listingUUID, href, i); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
