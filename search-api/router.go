@@ -8,12 +8,12 @@ import (
 	"github.com/go-chi/httprate"
 	"github.com/go-chi/render"
 	"github.com/yourorg/search-api/attom"
-	"github.com/yourorg/search-api/http"
+	httpapi "github.com/yourorg/search-api/http"
 	httpv1 "github.com/yourorg/search-api/http/v1"
 	"github.com/yourorg/search-api/internal/store"
 )
 
-func BuildRouter(attomClient *attom.Client, deps httpv1.ResolveDeps) http.Handler {
+func BuildRouter(listingClient *attom.Client, deps httpv1.ResolveDeps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(httprate.LimitByIP(100, 1*time.Minute)) // protect upstream quota
 	r.Use(render.SetContentType(render.ContentTypeJSON))
@@ -23,9 +23,9 @@ func BuildRouter(attomClient *attom.Client, deps httpv1.ResolveDeps) http.Handle
 	if deps.Hydrator != nil {
 		storeRef = deps.Hydrator.Store
 	}
-	httpapi.RegisterSearch(r, httpapi.SearchDeps{Hydrator: deps.Hydrator, ATTOM: attomClient})
+	httpapi.RegisterSearch(r, httpapi.SearchDeps{Hydrator: deps.Hydrator, ListingsClient: listingClient})
 	httpapi.RegisterHydrate(r, httpapi.HydrateDeps{})
-	httpapi.RegisterListings(r, httpapi.ListingsDeps{Hydrator: deps.Hydrator, Store: storeRef, ATTOM: attomClient})
+	httpapi.RegisterListings(r, httpapi.ListingsDeps{Hydrator: deps.Hydrator, Store: storeRef, ListingsClient: listingClient})
 
 	// v1 resolve endpoint with Redis + SWR
 	httpv1.RegisterResolve(r, deps)

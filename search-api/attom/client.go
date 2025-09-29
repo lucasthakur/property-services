@@ -117,10 +117,10 @@ func (c *Client) SearchListingsByPostal(ctx context.Context, postal string, page
 	return b, nil
 }
 
-// GetPhotos fetches photo URLs using listing_id as property_id.
-func (c *Client) GetPhotos(ctx context.Context, listingID string) ([]string, error) {
+// GetPhotos fetches photo URLs for a provider property_id.
+func (c *Client) GetPhotos(ctx context.Context, propertyID string) ([]PhotoAsset, error) {
 	q := url.Values{}
-	q.Set("property_id", listingID)
+	q.Set("property_id", propertyID)
 	u := fmt.Sprintf("%s/property/photos?%s", c.baseURL, q.Encode())
 
 	req, _ := retryablehttp.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -142,20 +142,40 @@ func (c *Client) GetPhotos(ctx context.Context, listingID string) ([]string, err
 	if err != nil {
 		return nil, err
 	}
-	logBody("GetPhotos", b)
+	log.Printf("[DEBUG] photos response for property %s: %s", propertyID, string(b))
 	var arr []struct {
-		Href string `json:"href"`
+		Description string `json:"description"`
+		Href        string `json:"href"`
+		Tags        []struct {
+			Label string `json:"label"`
+		} `json:"tags"`
+		Title string `json:"title"`
+		Type  string `json:"type"`
 	}
 	if err := json.Unmarshal(b, &arr); err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(arr))
-	for _, it := range arr {
-		if it.Href != "" {
-			out = append(out, upgradePhotoURL(it.Href))
+	assets := make([]PhotoAsset, 0, len(arr))
+	for idx, it := range arr {
+		if it.Href == "" {
+			continue
 		}
+		tags := make([]string, 0, len(it.Tags))
+		for _, tag := range it.Tags {
+			if tag.Label != "" {
+				tags = append(tags, tag.Label)
+			}
+		}
+		assets = append(assets, PhotoAsset{
+			Href:        upgradePhotoURL(it.Href),
+			Description: it.Description,
+			Title:       it.Title,
+			Kind:        it.Type,
+			Tags:        tags,
+			Position:    idx,
+		})
 	}
-	return out, nil
+	return assets, nil
 }
 
 func logBody(label string, body []byte) {

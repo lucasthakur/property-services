@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -82,6 +83,8 @@ func (s *Store) Migrate(ctx context.Context) error {
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             listing_id    UUID NOT NULL REFERENCES ingest_listings(id) ON DELETE CASCADE,
             href          TEXT NOT NULL,
+            description   TEXT,
+            media_type    TEXT,
             kind          TEXT,
             tags          JSONB,
             title         TEXT,
@@ -89,6 +92,21 @@ func (s *Store) Migrate(ctx context.Context) error {
             created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
         );`,
 		`CREATE INDEX IF NOT EXISTS idx_ingest_listphotos_listing ON ingest_listing_photos(listing_id);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_ingest_listphotos_listing_href ON ingest_listing_photos(listing_id, href);`,
+		`CREATE TABLE IF NOT EXISTS ingest_listing_photo_tags (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            photo_id UUID NOT NULL REFERENCES ingest_listing_photos(id) ON DELETE CASCADE,
+            label    TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS ux_ingest_listing_photo_tags_unique ON ingest_listing_photo_tags(photo_id, label);`,
+		`CREATE INDEX IF NOT EXISTS idx_ingest_listing_photo_tags_photo ON ingest_listing_photo_tags(photo_id);`,
+		`ALTER TABLE ingest_listing_photos ADD COLUMN IF NOT EXISTS description TEXT;`,
+		`ALTER TABLE ingest_listing_photos ADD COLUMN IF NOT EXISTS media_type TEXT;`,
+		`ALTER TABLE ingest_listing_photos ADD COLUMN IF NOT EXISTS tags JSONB;`,
+		`ALTER TABLE ingest_listing_photos ADD COLUMN IF NOT EXISTS kind TEXT;`,
+		`ALTER TABLE ingest_listing_photos ADD COLUMN IF NOT EXISTS title TEXT;`,
+		`ALTER TABLE ingest_listing_photos ADD COLUMN IF NOT EXISTS position INTEGER;`,
 		`CREATE TABLE IF NOT EXISTS ingest_provider_raw_snapshots (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             provider       TEXT NOT NULL,
@@ -124,6 +142,15 @@ func (s *Store) Migrate(ctx context.Context) error {
 	return nil
 }
 
+type ListingPhotoInput struct {
+	Href        string
+	Description string
+	Title       string
+	Kind        string
+	MediaType   string
+	Tags        []string
+	Position    int
+}
 type UpsertInput struct {
 	PropertyKey string
 	Address1    string
@@ -141,7 +168,7 @@ type UpsertInput struct {
 	Beds      sql.NullInt64
 	Baths     sql.NullFloat64
 	Sqft      sql.NullInt64
-	Photos    []string
+	Photos    []ListingPhotoInput
 	// Raw snapshot
 	Endpoint    string
 	ExternalID  string
@@ -212,15 +239,8 @@ func (s *Store) WriteSnapshotAndUpsert(ctx context.Context, in UpsertInput) (Ups
 		return res, err
 	}
 
-	// photos: replace current set with new set
-	if _, err = tx.ExecContext(ctx, `DELETE FROM ingest_listing_photos WHERE listing_id=$1`, res.ListingID); err != nil {
-		return res, err
-	}
-	for i, href := range in.Photos {
-		if href == "" {
-			continue
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO ingest_listing_photos (listing_id, href, position) VALUES ($1,$2,$3)`, res.ListingID, href, i); err != nil {
+	if len(in.Photos) > 0 {
+		if err = replaceListingPhotosTx(ctx, tx, res.ListingID, in.Photos); err != nil {
 			return res, err
 		}
 	}
@@ -349,7 +369,7 @@ func (s *Store) FetchListingPhotos(ctx context.Context, providerListingID string
 	return photos, nil
 }
 
-func (s *Store) ReplaceListingPhotos(ctx context.Context, providerListingID string, photos []string) error {
+func (s *Store) ReplaceListingPhotos(ctx context.Context, providerListingID string, photos []ListingPhotoInput) error {
 	if s.DB == nil {
 		return errors.New("nil db")
 	}
@@ -370,16 +390,90 @@ func (s *Store) ReplaceListingPhotos(ctx context.Context, providerListingID stri
 			_ = tx.Rollback()
 		}
 	}()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM ingest_listing_photos WHERE listing_id=$1`, listingUUID); err != nil {
+	if err = replaceListingPhotosTx(ctx, tx, listingUUID, photos); err != nil {
 		return err
 	}
-	for i, href := range photos {
-		if href == "" {
+	return tx.Commit()
+}
+
+func (s *Store) LookupPropertyKeyByListing(ctx context.Context, providerListingID string) (string, error) {
+	if s.DB == nil {
+		return "", errors.New("nil db")
+	}
+	var propertyKey string
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT p.property_key
+		FROM ingest_listings l
+		JOIN ingest_properties p ON p.id = l.property_id
+		WHERE l.listing_id = $1
+		ORDER BY l.updated_at DESC
+		LIMIT 1
+	`, providerListingID).Scan(&propertyKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return propertyKey, nil
+}
+
+func replaceListingPhotosTx(ctx context.Context, tx *sql.Tx, listingUUID string, photos []ListingPhotoInput) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM ingest_listing_photos WHERE listing_id=$1`, listingUUID); err != nil {
+		return err
+	}
+	for idx, photo := range photos {
+		if photo.Href == "" {
 			continue
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO ingest_listing_photos (listing_id, href, position) VALUES ($1,$2,$3)`, listingUUID, href, i); err != nil {
+		position := photo.Position
+		if position < 0 {
+			position = idx
+		}
+		var tagsJSON any
+		if len(photo.Tags) > 0 {
+			b, err := json.Marshal(photo.Tags)
+			if err != nil {
+				return err
+			}
+			tagsJSON = b
+		}
+		var photoID string
+		if err := tx.QueryRowContext(ctx, `
+			INSERT INTO ingest_listing_photos (listing_id, href, description, media_type, kind, tags, title, position)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+			RETURNING id
+		`,
+			listingUUID,
+			photo.Href,
+			nullString(photo.Description),
+			nullString(photo.MediaType),
+			nullString(photo.Kind),
+			tagsJSON,
+			nullString(photo.Title),
+			position,
+		).Scan(&photoID); err != nil {
 			return err
 		}
+		for _, label := range photo.Tags {
+			if label == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO ingest_listing_photo_tags (photo_id, label)
+				VALUES ($1,$2)
+				ON CONFLICT (photo_id, label) DO NOTHING
+			`, photoID, label); err != nil {
+				return err
+			}
+		}
 	}
-	return tx.Commit()
+	return nil
+}
+
+func nullString(v string) sql.NullString {
+	if v == "" {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: v, Valid: true}
 }

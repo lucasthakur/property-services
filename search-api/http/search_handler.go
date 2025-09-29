@@ -13,8 +13,8 @@ import (
 )
 
 type SearchDeps struct {
-	Hydrator *hydrator.Hydrator
-	ATTOM    *attom.Client
+	Hydrator       *hydrator.Hydrator
+	ListingsClient *attom.Client
 }
 
 type SearchRequest struct {
@@ -148,7 +148,7 @@ func handleSearchRequest(w http.ResponseWriter, req *http.Request, d SearchDeps,
 				log.Printf("[INFO] no database listings for %s; falling back to RapidAPI", body.PostalCode)
 			}
 		}
-		raw, err := d.ATTOM.SearchByPostal(req.Context(), body.PostalCode, pagesize, page, body.PropertyType, body.OrderBy)
+		raw, err := d.ListingsClient.SearchByPostal(req.Context(), body.PostalCode, pagesize, page, body.PropertyType, body.OrderBy)
 		if err != nil {
 			render.Status(req, http.StatusBadGateway)
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": "upstream_error", "detail": err.Error()})
@@ -180,7 +180,7 @@ func handleSearchRequest(w http.ResponseWriter, req *http.Request, d SearchDeps,
 	lon := *body.Lon
 	radius := defFloat(body.Radius, 0.5)
 	limit := defInt(body.Limit, 40)
-	raw, err := d.ATTOM.SearchByRadius(req.Context(), lat, lon, radius, limit, 0, 0, 0, 0, "")
+	raw, err := d.ListingsClient.SearchByRadius(req.Context(), lat, lon, radius, limit, 0, 0, 0, 0, "")
 	if err != nil {
 		render.Status(req, http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "upstream_error", "detail": err.Error()})

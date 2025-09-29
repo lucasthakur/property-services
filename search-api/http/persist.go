@@ -37,11 +37,16 @@ func recordsToCards(records []store.ListingRecord) []attom.PropertyCard {
 	cards := make([]attom.PropertyCard, 0, len(records))
 	for _, rec := range records {
 		var card attom.PropertyCard
+		listingID := ""
 		if rec.ListingExternalID.Valid && rec.ListingExternalID.String != "" {
-			card.ID = rec.ListingExternalID.String
-		} else {
-			card.ID = rec.PropertyKey
+			listingID = rec.ListingExternalID.String
 		}
+		if listingID == "" {
+			listingID = rec.PropertyKey
+		}
+		card.ID = listingID
+		card.ListingID = listingID
+		card.PropertyID = rec.PropertyKey
 		card.Address = rec.AddressLine1
 		card.City = rec.City
 		card.State = rec.State

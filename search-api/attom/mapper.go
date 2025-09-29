@@ -56,9 +56,10 @@ func MapSearchPayloadToCards(raw []byte) ([]PropertyCard, error) {
 		Href string `json:"href"`
 	}
 	type rProp struct {
-		ListingID string `json:"listing_id"`
-		ListPrice int    `json:"list_price"`
-		Location  struct {
+		ListingID  string `json:"listing_id"`
+		PropertyID string `json:"property_id"`
+		ListPrice  int    `json:"list_price"`
+		Location   struct {
 			Address rAddr `json:"address"`
 		} `json:"location"`
 		Description  rDesc    `json:"description"`
@@ -82,44 +83,46 @@ func MapSearchPayloadToCards(raw []byte) ([]PropertyCard, error) {
 				baths = i
 			}
 		}
-		// images (primary + inline photos)
-		imgs := make([]string, 0, 1+len(p.Photos))
-		if p.PrimaryPhoto.Href != "" {
-			imgs = append(imgs, upgradePhotoURL(p.PrimaryPhoto.Href))
-		}
-		for _, ph := range p.Photos {
-			if ph.Href != "" {
-				imgs = append(imgs, upgradePhotoURL(ph.Href))
-			}
-		}
+		var imgs []string
 
 		state := p.Location.Address.StateCode
 		if state == "" {
 			state = p.Location.Address.State
 		}
 
+		propertyID := p.PropertyID
+		if propertyID == "" {
+			propertyID = p.ListingID
+		}
+		listingID := p.ListingID
+		if listingID == "" {
+			listingID = propertyID
+		}
+
 		out = append(out, PropertyCard{
-			ID:        p.ListingID,
-			Address:   p.Location.Address.Line,
-			City:      p.Location.Address.City,
-			State:     state,
-			Zip:       p.Location.Address.PostalCode,
-			Type:      p.Description.Type,
-			Price:     p.ListPrice,
-			Beds:      maxInt(p.Description.Beds, 0),
-			Baths:     maxInt(baths, 0),
-			Sqft:      maxInt(p.Description.Sqft, 0),
-			YearBuilt: 0,
-			Images:    imgs,
-			Coords:    [2]float64{p.Location.Address.Coordinate.Lon, p.Location.Address.Coordinate.Lat},
-			MLS:       "",
-			Source:    "rapidapi",
+			ID:         listingID,
+			ListingID:  listingID,
+			PropertyID: propertyID,
+			Address:    p.Location.Address.Line,
+			City:       p.Location.Address.City,
+			State:      state,
+			Zip:        p.Location.Address.PostalCode,
+			Type:       p.Description.Type,
+			Price:      p.ListPrice,
+			Beds:       maxInt(p.Description.Beds, 0),
+			Baths:      maxInt(baths, 0),
+			Sqft:       maxInt(p.Description.Sqft, 0),
+			YearBuilt:  0,
+			Images:     imgs,
+			Coords:     [2]float64{p.Location.Address.Coordinate.Lon, p.Location.Address.Coordinate.Lat},
+			MLS:        "",
+			Source:     "rapidapi",
 		})
 	}
 	return out, nil
 }
 
-// MapListingPayloadToCards maps ATTOM Listing Snapshot payload to PropertyCard slice.
+// MapListingPayloadToCards maps listing provider snapshot payload to PropertyCard slice.
 // This function is intentionally defensive to tolerate minor schema differences across plans.
 func MapListingPayloadToCards(raw []byte) ([]PropertyCard, error) {
 	// Same mapping as search for RapidAPI Realtor.

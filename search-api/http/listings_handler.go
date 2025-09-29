@@ -10,14 +10,15 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
 	"github.com/yourorg/search-api/attom"
+	"github.com/yourorg/search-api/internal/canon"
 	"github.com/yourorg/search-api/internal/hydrator"
 	"github.com/yourorg/search-api/internal/store"
 )
 
 type ListingsDeps struct {
-	Hydrator *hydrator.Hydrator
-	Store    *store.Store
-	ATTOM    *attom.Client
+	Hydrator       *hydrator.Hydrator
+	Store          *store.Store
+	ListingsClient *attom.Client
 }
 
 type ListingsRequest struct {
@@ -135,7 +136,7 @@ func handleListingsRequest(w http.ResponseWriter, req *http.Request, d ListingsD
 			log.Printf("[INFO] no database listings for %s; falling back to RapidAPI", body.PostalCode)
 		}
 	}
-	raw, err := d.ATTOM.SearchListingsByPostal(req.Context(), body.PostalCode, pagesize, page, beds, baths, minp, maxp, body.PropertyType, body.OrderBy)
+	raw, err := d.ListingsClient.SearchListingsByPostal(req.Context(), body.PostalCode, pagesize, page, beds, baths, minp, maxp, body.PropertyType, body.OrderBy)
 	if err != nil {
 		render.Status(req, http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "upstream_error", "detail": err.Error()})
@@ -147,20 +148,30 @@ func handleListingsRequest(w http.ResponseWriter, req *http.Request, d ListingsD
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "map_error", "detail": err.Error()})
 		return
 	}
-	// Hydrate photos only when images are missing to avoid 429s
-	for i := range cards {
-		if cards[i].ID == "" {
-			continue
-		}
-		if len(cards[i].Images) > 0 {
-			continue
-		}
-		photos, err := d.ATTOM.GetPhotos(req.Context(), cards[i].ID)
-		if err == nil && len(photos) > 0 {
-			cards[i].Images = photos
-		}
-	}
 	persistCards(req.Context(), d.Hydrator, "search/forsale", raw, cards)
+	for i := range cards {
+		listingID := cards[i].ListingID
+		if listingID == "" {
+			listingID = cards[i].ID
+		}
+		propertyID := cards[i].PropertyID
+		if propertyID == "" {
+			if _, _, _, _, pk := canon.Canonicalize(cards[i].Address, cards[i].City, cards[i].State, cards[i].Zip); pk != "" {
+				propertyID = pk
+				cards[i].PropertyID = pk
+			}
+		}
+		if listingID == "" && propertyID == "" {
+			continue
+		}
+		cards[i].ListingID = listingID
+		photos, err := loadListingPhotos(req.Context(), listingID, propertyID, store, d.ListingsClient)
+		if err != nil {
+			log.Printf("[WARN] unable to load photos for listing %s: %v", listingID, err)
+			continue
+		}
+		cards[i].Images = photos
+	}
 	log.Printf("[INFO] served listings for %s from RapidAPI (%d listings)", body.PostalCode, len(cards))
 	render.JSON(w, req, map[string]any{"ok": true, "count": len(cards), "properties": cards})
 }
@@ -170,24 +181,81 @@ func fetchListingPhotos(ctx context.Context, listingID string, d ListingsDeps) (
 	if store == nil && d.Hydrator != nil {
 		store = d.Hydrator.Store
 	}
-	if store != nil {
-		if urls, err := store.FetchListingPhotos(ctx, listingID); err == nil && len(urls) > 0 {
-			return urls, nil
-		} else if err != nil {
+	var propertyID string
+	if store != nil && listingID != "" {
+		pk, err := store.LookupPropertyKeyByListing(ctx, listingID)
+		if err != nil {
+			log.Printf("[WARN] property lookup failed for listing %s: %v", listingID, err)
+		} else {
+			propertyID = pk
+		}
+	}
+	return loadListingPhotos(ctx, listingID, propertyID, store, d.ListingsClient)
+}
+
+func photoHrefs(assets []attom.PhotoAsset) []string {
+	hrefs := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		if asset.Href == "" {
+			continue
+		}
+		hrefs = append(hrefs, asset.Href)
+	}
+	return hrefs
+}
+
+func toStorePhotoInputs(assets []attom.PhotoAsset) []store.ListingPhotoInput {
+	out := make([]store.ListingPhotoInput, 0, len(assets))
+	for idx, asset := range assets {
+		if asset.Href == "" {
+			continue
+		}
+		mediaType := asset.MediaType
+		if mediaType == "" {
+			mediaType = asset.Kind
+		}
+		out = append(out, store.ListingPhotoInput{
+			Href:        asset.Href,
+			Description: asset.Description,
+			Title:       asset.Title,
+			Kind:        asset.Kind,
+			MediaType:   mediaType,
+			Tags:        asset.Tags,
+			Position:    idx,
+		})
+	}
+	return out
+}
+
+func loadListingPhotos(ctx context.Context, listingID, propertyID string, st *store.Store, client *attom.Client) ([]string, error) {
+	if listingID == "" && propertyID == "" {
+		return nil, nil
+	}
+	if listingID != "" && st != nil {
+		urls, err := st.FetchListingPhotos(ctx, listingID)
+		if err == nil {
+			if len(urls) > 0 {
+				return urls, nil
+			}
+		} else {
 			log.Printf("[WARN] store photo lookup failed for listing %s: %v", listingID, err)
 		}
 	}
-	if d.ATTOM == nil {
+	if client == nil {
 		return nil, nil
 	}
-	photos, err := d.ATTOM.GetPhotos(ctx, listingID)
+	targetID := propertyID
+	if targetID == "" {
+		targetID = listingID
+	}
+	assets, err := client.GetPhotos(ctx, targetID)
 	if err != nil {
 		return nil, err
 	}
-	if store != nil && len(photos) > 0 {
-		if err := store.ReplaceListingPhotos(ctx, listingID, photos); err != nil {
+	if st != nil && listingID != "" && len(assets) > 0 {
+		if err := st.ReplaceListingPhotos(ctx, listingID, toStorePhotoInputs(assets)); err != nil {
 			log.Printf("[WARN] unable to persist photos for %s: %v", listingID, err)
 		}
 	}
-	return photos, nil
+	return photoHrefs(assets), nil
 }
