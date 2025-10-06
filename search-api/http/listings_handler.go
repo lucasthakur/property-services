@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -138,6 +139,11 @@ func handleListingsRequest(w http.ResponseWriter, req *http.Request, d ListingsD
 	}
 	raw, err := d.ListingsClient.SearchListingsByPostal(req.Context(), body.PostalCode, pagesize, page, beds, baths, minp, maxp, body.PropertyType, body.OrderBy)
 	if err != nil {
+		if errors.Is(err, attom.ErrDailyLimitExceeded) {
+			render.Status(req, http.StatusTooManyRequests)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "provider_quota", "detail": "daily quota reached"})
+			return
+		}
 		render.Status(req, http.StatusBadGateway)
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": "upstream_error", "detail": err.Error()})
 		return

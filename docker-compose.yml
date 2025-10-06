@@ -18,6 +18,32 @@ services:
       - "${GO_API_PORT:-4002}:4002"
     networks: [propnet]
 
+  hydrator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ps-search-api:latest
+    container_name: ps-hydrator
+    entrypoint: ["/app/bin/hydrator"]
+    command: ["/app/bin/hydrator"]
+    environment:
+      RAPIDAPI_KEY: ${RAPIDAPI_KEY}
+      PG_DSN: ${PG_DSN:-postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@host.docker.internal:5432/${POSTGRES_DB:-roa}?sslmode=disable&search_path=ingest,public}
+      HYDRATOR_ZIPS: ${HYDRATOR_ZIPS}
+      HYDRATOR_INTERVAL: ${HYDRATOR_INTERVAL:-6h}
+      HYDRATOR_PAGE_SIZE: ${HYDRATOR_PAGE_SIZE:-50}
+      HYDRATOR_MAX_PAGES: ${HYDRATOR_MAX_PAGES:-5}
+      HYDRATOR_PAUSE: ${HYDRATOR_PAUSE:-1500ms}
+      HYDRATOR_FETCH_PHOTOS: ${HYDRATOR_FETCH_PHOTOS:-0}
+      HYDRATOR_REQUEST_TIMEOUT: ${HYDRATOR_REQUEST_TIMEOUT:-12s}
+      HYDRATOR_PROPERTY_TYPES: ${HYDRATOR_PROPERTY_TYPES:-}
+      HYDRATOR_ORDER_BY: ${HYDRATOR_ORDER_BY:-}
+      HYDRATOR_MIN_BEDS: ${HYDRATOR_MIN_BEDS:-0}
+      HYDRATOR_MIN_BATHS: ${HYDRATOR_MIN_BATHS:-0}
+      HYDRATOR_MIN_PRICE: ${HYDRATOR_MIN_PRICE:-0}
+      HYDRATOR_MAX_PRICE: ${HYDRATOR_MAX_PRICE:-0}
+    networks: [propnet]
+
 networks:
   propnet:
     external: true

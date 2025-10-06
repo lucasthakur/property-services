@@ -1,6 +1,8 @@
 module github.com/yourorg/search-api
 
-go 1.22
+go 1.24.0
+
+toolchain go1.24.5
 
 require (
 	github.com/go-chi/chi/v5 v5.0.11
@@ -9,6 +11,7 @@ require (
 	github.com/hashicorp/go-retryablehttp v0.7.7
 	github.com/jackc/pgx/v5 v5.5.5
 	github.com/redis/go-redis/v9 v9.6.1
+	golang.org/x/time v0.13.0
 )
 
 require (

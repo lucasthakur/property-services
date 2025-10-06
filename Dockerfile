@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS build
+FROM golang:1.24-alpine AS build
 WORKDIR /app
 
 # Copy module definition from subfolder and download deps
@@ -8,13 +8,16 @@ RUN go mod download
 # Copy the rest of the source from the subfolder
 COPY search-api/. ./
 
-# Build the binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server .
+ENV CGO_ENABLED=0 GOOS=linux
+
+RUN go build -o /build/search-api ./
+RUN go build -o /build/hydrator ./cmd/hydrator
 
 FROM alpine:3.19
 WORKDIR /app
 RUN apk add --no-cache ca-certificates
-COPY --from=build /app/server /app/server
-# App logs indicate it listens on :4002
+COPY --from=build /build/search-api /app/bin/search-api
+COPY --from=build /build/hydrator /app/bin/hydrator
+
 EXPOSE 4002
-ENTRYPOINT ["/app/server"]
+ENTRYPOINT ["/app/bin/search-api"]

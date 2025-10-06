@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -79,6 +80,9 @@ func main() {
 				// Fetch fresh
 				raw, err := listingClient.SearchByPostal(ctx, zip, 20, 1, "", "")
 				if err != nil {
+					if errors.Is(err, attom.ErrDailyLimitExceeded) {
+						log.Printf("[WARN] refetch skipped due to provider daily quota: %v", err)
+					}
 					return
 				}
 				cards, err := attom.MapSearchPayloadToCards(raw)
